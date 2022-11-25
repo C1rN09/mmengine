@@ -6,6 +6,12 @@ from typing import Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch._dynamo as dynamo
+import torch._inductor as inductor
+import torch._inductor.config
+inductor.config.cpp.cxx = inductor.config.cpp.cxx[1:]
+
+import os
+dynamo_backend = os.environ['BACKEND']
 
 from mmengine.optim import OptimWrapper
 from mmengine.registry import MODELS
@@ -82,7 +88,7 @@ class BaseModel(BaseModule):
                             f'`nn.Module` instance, but got '
                             f'{type(data_preprocessor)}')
 
-    @dynamo.optimize('inductor')
+    @dynamo.optimize(dynamo_backend)
     def train_step(self, data: Union[dict, tuple, list],
                    optim_wrapper: OptimWrapper) -> Dict[str, torch.Tensor]:
         """Implements the default model training process including
