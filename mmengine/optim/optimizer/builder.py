@@ -33,6 +33,46 @@ def register_torch_optimizers() -> List[str]:
 TORCH_OPTIMIZERS = register_torch_optimizers()
 
 
+def register_colossal_optimizers() -> List[str]:
+    """Register optimizers in colossalai to the ``OPTIMIZERS`` registry.
+
+    Returns:
+        List[str]: A list of registered optimizers' name.
+    """
+    try:
+        import colossalai.nn
+    except ImportError:
+        return []
+    colossal_optimizers = []
+    for module_name in dir(colossalai.nn.optimizer):
+        if module_name.startswith('__'):
+            continue
+        _optim = getattr(colossalai.nn.optimizer, module_name)
+        if inspect.isclass(_optim) and issubclass(_optim,
+                                                  torch.optim.Optimizer):
+            OPTIMIZERS.register_module(module=_optim)
+            colossal_optimizers.append(module_name)
+    return colossal_optimizers
+
+
+COLOSSAL_OPTIMIZERS = register_colossal_optimizers()
+
+# HybridAdam has different function signature. It receives `model_params`
+# instead of `params`. Re-register it with a wrapper to be consistent with
+# other optimizers
+try:
+    from colossalai.nn.optimizer import HybridAdam as _HybridAdam
+except ImportError:
+    _HybridAdam = object
+
+
+@OPTIMIZERS.register_module(force=True)
+class HybridAdam(_HybridAdam):
+
+    def __init__(self, params, *args, **kwargs):
+        super().__init__(params, *args, **kwargs)
+
+
 def build_optim_wrapper(model: nn.Module,
                         cfg: Union[dict, Config, ConfigDict]) -> OptimWrapper:
     """Build function of OptimWrapper.

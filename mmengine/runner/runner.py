@@ -402,6 +402,9 @@ class Runner:
             # Merge the data_preprocessor to model config.
             model.setdefault('data_preprocessor', data_preprocessor)
         self.model = self.build_model(model)
+        # Wrapped model becomes sharded and can no longer be initialized.
+        # TODO(C1rN09): This is a temp workaround and will be modified later.
+        self._init_model_weights()
         # wrap model
         self.model = self.wrap_model(
             self.cfg.get('model_wrapper_cfg'), self.model)
@@ -1224,7 +1227,9 @@ class Runner:
             # `OptimWrapperDict` instance. Therefore, here we simply check
             # self.optim_wrapper is not an `OptimWrapperDict` instance and
             # then assert it is an OptimWrapper instance.
-            assert isinstance(self.optim_wrapper, OptimWrapper), (
+            # TODO(C1rN09): ColossalZeroOptimizer is not a subclass of
+            # OptimWrapper. This logic should be changed.
+            assert hasattr(self.optim_wrapper, 'param_groups'), (
                 '`build_optimizer` should be called before'
                 '`build_param_scheduler` because the latter depends '
                 'on the former')
@@ -1671,7 +1676,9 @@ class Runner:
         self.call_hook('before_run')
 
         # initialize the model weights
-        self._init_model_weights()
+        # Wrapped model becomes sharded and can no longer be initialized.
+        # TODO(C1rN09): This is a temp workaround and will be modified later.
+        # self._init_model_weights()
         # make sure checkpoint-related hooks are triggered after `before_run`
         self.load_or_resume()
 

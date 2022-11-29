@@ -58,6 +58,10 @@ def init_dist(launcher, backend='nccl', **kwargs) -> None:
         _init_dist_mpi(backend, **kwargs)
     elif launcher == 'slurm':
         _init_dist_slurm(backend, **kwargs)
+    # TODO(C1rN09): colossalai may launch from pytorch, mpi or slurm. Should
+    # support all of them
+    elif launcher.startswith('colossalai'):
+        _init_dist_colossalai(backend, **kwargs)
     else:
         raise ValueError(f'Invalid launcher type: {launcher}')
 
@@ -156,6 +160,33 @@ def _init_dist_slurm(backend, port=None) -> None:
     os.environ['LOCAL_RANK'] = str(proc_id % num_gpus)
     os.environ['RANK'] = str(proc_id)
     torch_dist.init_process_group(backend=backend)
+
+
+# TODO(C1rN09): colossalai may launch from pytorch, mpi or slurm. Should
+# support all of them
+def _init_dist_colossalai(backend, **kwargs):
+    try:
+        import colossalai
+    except ImportError:
+        raise RuntimeError(
+            'Error import colossalai, please check the installation')
+    # from colossalai.context import ParallelMode
+    # from colossalai.core import global_context as gpc
+    # from colossalai.logging import disable_existing_loggers
+    # if not gpc.is_initialized(ParallelMode.GLOBAL):
+    #     disable_existing_loggers()
+    #     gpc.init_global_dist(
+    #         rank=int(os.environ['RANK']),
+    #         world_size=int(os.environ['WORLD_SIZE']),
+    #         backend=backend,
+    #         host=os.environ.get('MASTER_ADDR', '127.0.0.1'),
+    #         port=os.environ.get('MASTER_PORT', 29500)
+    #     )
+    #     gpc.set_device(int(os.environ['LOCAL_RANK']))
+    from mmengine.logging import MMLogger
+    import logging
+    verbose = MMLogger.get_current_instance().level == logging.debug
+    colossalai.launch_from_torch({}, backend=backend, verbose=verbose)
 
 
 def init_local_group(node_rank: int, num_gpus_per_node: int):
