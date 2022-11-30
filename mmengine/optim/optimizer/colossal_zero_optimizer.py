@@ -230,3 +230,37 @@ class ColossalZeroOptimizer(_ZeroOptimizer):
                         'optimizer: \n')
         optimizer_str = repr(self.optimizer) + '\n'
         return wrapper_info + optimizer_str
+
+    def state_dict(self):
+        """Refer to:
+
+        colossalai.utils.checkpoint.module_checkpoint.save_checkpoint
+        """
+        import copy
+
+        import torch.distributed as torch_dist
+        from colossalai.tensor import ColoTensor
+        from colossalai.utils.checkpoint.utils import gather_tensor
+        mapping = dict()
+        optim_state = self.optim.state_dict()
+        for k, v in optim_state['state'].items():
+            for n, t in v.items():
+                if isinstance(t, ColoTensor):
+                    mapping[(k, n)] = t.dist_spec
+                    gather_tensor(t)
+
+        state_dict = {}
+        if torch_dist.get_rank() == 0:
+            state_dict = copy.deepcopy(optim_state)
+            # recover colo tensors in rank0
+            for k, v in self.optim.state_dict()['state'].items():
+                for n, t in v.items():
+                    if isinstance(t, ColoTensor):
+                        assert hasattr(t, 'save_ready')
+                        t.set_dist_spec(mapping[(k, n)])
+                        delattr(t, 'save_ready')
+
+        del optim_state
+        del mapping
+        torch_dist.barrier()
+        return state_dict

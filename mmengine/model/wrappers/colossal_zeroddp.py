@@ -84,7 +84,8 @@ class ColossalZeroDDP(ZeroDDP):
         Returns:
             list: The predictions of given data.
         """
-        return self.module.val_step(data)
+        data = self.module.data_preprocessor(data, False)
+        return self._run_forward(data, mode='predict')  # type: ignore
 
     def test_step(self, data: Union[dict, tuple, list]) -> list:
         """Gets the predictions of module during testing process.
@@ -95,7 +96,8 @@ class ColossalZeroDDP(ZeroDDP):
         Returns:
             list: The predictions of given data.
         """
-        return self.module.test_step(data)
+        data = self.module.data_preprocessor(data, False)
+        return self._run_forward(data, mode='predict')  # type: ignore
 
     def _run_forward(self, data: Union[dict, tuple, list], mode: str) -> Any:
         """Unpacks data for :meth:`forward`

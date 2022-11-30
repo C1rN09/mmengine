@@ -601,6 +601,35 @@ def _save_to_state_dict(module, destination, prefix, keep_vars):
             destination[prefix + name] = buf if keep_vars else buf.detach()
 
 
+def _get_state_dict_colozero(module):
+    """Refer to:
+
+    colossalai.utils.checkpoint.module_checkpoint.save_checkpoint
+    """
+    import copy
+
+    import torch.distributed as torch_dist
+    from colossalai.tensor import ColoTensor
+    from colossalai.utils.checkpoint.utils import gather_tensor
+    model_state = module.state_dict()
+    for k, v in model_state.items():
+        if isinstance(v, ColoTensor):
+            gather_tensor(v)
+
+    state_dict = {}
+    if torch_dist.get_rank() == 0:
+        for k, v in model_state.items():
+            if isinstance(v, ColoTensor):
+                assert v.save_ready
+                assert v.is_replicate()
+                delattr(v, 'save_ready')
+        state_dict = copy.deepcopy(model_state)
+
+    del model_state
+    torch_dist.barrier()
+    return state_dict
+
+
 def get_state_dict(module, destination=None, prefix='', keep_vars=False):
     """Returns a dictionary containing a whole state of the module.
 
@@ -621,6 +650,11 @@ def get_state_dict(module, destination=None, prefix='', keep_vars=False):
     Returns:
         dict: A dictionary containing a whole state of the module.
     """
+    # TODO(C1rN09): This is just a workaround
+    from mmengine.model.wrappers import ColossalZeroDDP
+    if isinstance(module, ColossalZeroDDP):
+        return _get_state_dict_colozero(module)
+
     # recursively check parallel module in case that the model has a
     # complicated structure, e.g., nn.Module(nn.Module(DDP))
     if is_model_wrapper(module):

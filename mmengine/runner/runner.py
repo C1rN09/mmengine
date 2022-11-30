@@ -21,8 +21,9 @@ import mmengine
 from mmengine.config import Config, ConfigDict
 from mmengine.dataset import COLLATE_FUNCTIONS, worker_init_fn
 from mmengine.device import get_device
-from mmengine.dist import (broadcast, get_dist_info, get_rank, init_dist,
-                           is_distributed, master_only)
+from mmengine.dist import (barrier, broadcast, get_dist_info, get_rank,
+                           init_dist, is_distributed, is_main_process,
+                           master_only)
 from mmengine.evaluator import Evaluator
 from mmengine.fileio import FileClient, join_path
 from mmengine.hooks import Hook
@@ -1607,6 +1608,7 @@ class Runner:
                 stage_hook_infos.append(info)
         return '\n'.join(stage_hook_infos)
 
+    # TODO(C1rN09): fix colossal zero load checkpoint
     def load_or_resume(self) -> None:
         """load or resume checkpoint."""
         if self._has_loaded:
@@ -2054,7 +2056,9 @@ class Runner:
 
         return checkpoint
 
-    @master_only
+    # save_checkpoint should not be decorated with @master_only, because
+    # training models with sharded parameters require all processes to gather
+    # model's state_dict and optimizer's state_dict
     def save_checkpoint(
         self,
         out_dir: str,
@@ -2130,20 +2134,21 @@ class Runner:
         if hasattr(self.train_dataloader.dataset, 'metainfo'):
             meta.update(dataset_meta=self.train_dataloader.dataset.metainfo)
 
-        if is_model_wrapper(self.model):
-            model = self.model.module
-        else:
-            model = self.model
-
         checkpoint = {
             'meta': meta,
-            'state_dict': weights_to_cpu(get_state_dict(model)),
+            'state_dict': weights_to_cpu(get_state_dict(self.model)),
             'message_hub': self.message_hub.state_dict()
         }
+
         # save optimizer state dict to checkpoint
         if save_optimizer:
-            if isinstance(self.optim_wrapper, OptimWrapper):
-                checkpoint['optimizer'] = self.optim_wrapper.state_dict()
+            # TODO(C1rN09): Some optim wrappers are not subclasses of
+            # OptimWrapper. This modification is just a workaround. Maybe
+            # should define a metaclass?
+            # if isinstance(self.optim_wrapper, OptimWrapper):
+            if hasattr(self.optim_wrapper, 'state_dict'):
+                checkpoint['optimizer'] = \
+                    self.optim_wrapper.state_dict()  # type: ignore
             else:
                 raise TypeError(
                     'self.optim_wrapper should be an `OptimWrapper` '
@@ -2173,7 +2178,10 @@ class Runner:
                     checkpoint['param_schedulers'].append(state_dict)
 
         self.call_hook('before_save_checkpoint', checkpoint=checkpoint)
-        save_checkpoint(checkpoint, filepath)
+        # Avoid multiple processes saving checkpoint simultaneously
+        if is_main_process():
+            save_checkpoint(checkpoint, filepath)
+        barrier()
 
     @master_only
     def dump_config(self) -> None:
