@@ -61,7 +61,8 @@ def init_dist(launcher, backend='nccl', **kwargs) -> None:
     # TODO(C1rN09): colossalai may launch from pytorch, mpi or slurm. Should
     # support all of them
     elif launcher.startswith('colossalai'):
-        _init_dist_colossalai(backend, **kwargs)
+        launcher = launcher.split('.')[-1] if '.' in launcher else 'pytorch'
+        _init_dist_colossalai(launcher, backend, **kwargs)
     else:
         raise ValueError(f'Invalid launcher type: {launcher}')
 
@@ -164,7 +165,7 @@ def _init_dist_slurm(backend, port=None) -> None:
 
 # TODO(C1rN09): colossalai may launch from pytorch, mpi or slurm. Should
 # support all of them
-def _init_dist_colossalai(backend, **kwargs):
+def _init_dist_colossalai(launcher, backend, **kwargs):
     try:
         import colossalai
     except ImportError:
@@ -186,7 +187,22 @@ def _init_dist_colossalai(backend, **kwargs):
     from mmengine.logging import MMLogger
     import logging
     verbose = MMLogger.get_current_instance().level == logging.debug
-    colossalai.launch_from_torch({}, backend=backend, verbose=verbose)
+    kwargs.setdefault('verbose', verbose)
+    config = kwargs.pop('config', {})
+    if launcher == 'pytorch':
+        colossalai.launch_from_torch(config, backend=backend, **kwargs)
+    elif launcher == 'slurm':
+        node_list = os.environ['SLURM_NODELIST']
+        addr = subprocess.getoutput(
+            f'scontrol show hostname {node_list} | head -n1')
+        kwargs.setdefault('host', os.environ.get('MASTER_ADDR') or addr)
+        kwargs.setdefault('port', os.environ.get('MASTER_PORT') or '29500')
+        colossalai.launch_from_slurm(config, backend=backend, **kwargs)
+    elif launcher == 'mpi':
+        kwargs.setdefault('host', os.environ.get('MASTER_ADDR'))
+        assert kwargs['host'] is not None
+        kwargs.setdefault('port', os.environ.get('MASTER_PORT') or '29500')
+        colossalai.launch_from_openmpi(config, backend=backend, **kwargs)
 
 
 def init_local_group(node_rank: int, num_gpus_per_node: int):
