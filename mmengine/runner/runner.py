@@ -35,7 +35,8 @@ from mmengine.registry import (DATA_SAMPLERS, DATASETS, EVALUATOR, HOOKS,
                                LOG_PROCESSORS, LOOPS, MODEL_WRAPPERS, MODELS,
                                OPTIM_WRAPPERS, PARAM_SCHEDULERS, RUNNERS,
                                VISUALIZERS, DefaultScope)
-from mmengine.utils import digit_version, get_git_hash, is_seq_of
+from mmengine.utils import (deprecated_function, digit_version, get_git_hash,
+                            is_seq_of)
 from mmengine.utils.dl_utils import (TORCH_VERSION, collect_env,
                                      set_multi_processing)
 from mmengine.visualization import Visualizer
@@ -1596,28 +1597,36 @@ class Runner:
                 stage_hook_infos.append(info)
         return '\n'.join(stage_hook_infos)
 
-    def load_or_resume(self) -> None:
-        """load or resume checkpoint."""
+    def maybe_load_or_resume(self) -> None:
+        """Choose to load/resume from the given/auto-inferred checkpoint.
+
+        If the runner has already loaded from the checkpoint, the function will
+        not take effect.
+        """
         if self._has_loaded:
             return None
 
-        # decide to load from checkpoint or resume from checkpoint
-        resume_from = None
-        if self._resume and self._load_from is None:
-            # auto resume from the latest checkpoint
-            resume_from = find_latest_checkpoint(self.work_dir)
-            self.logger.info(
-                f'Auto resumed from the latest checkpoint {resume_from}.')
-        elif self._resume and self._load_from is not None:
-            # resume from the specified checkpoint
-            resume_from = self._load_from
+        # Neither resume nor load_from, do nothing
+        if not self._resume and self._load_from is None:
+            return None
 
-        if resume_from is not None:
-            self.resume(resume_from)
-            self._has_loaded = True
-        elif self._load_from is not None:
-            self.load_checkpoint(self._load_from)
-            self._has_loaded = True
+        # The checkpoint priority is:
+        #     1. The given checkpoint path in `self._load_from`
+        #     2. If not given, search the work_dir and find the latest one
+        ckpt_path = self._load_from or find_latest_checkpoint(self.work_dir)
+
+        # No latest checkpoint in work_dir, skip
+        if ckpt_path is None:
+            return None
+
+        action = 'Resume' if self._resume else 'Load'
+        self.logger.info(f'{action} from the checkpoint: {ckpt_path}')
+
+        resume_related = ['meta', 'optimizer', 'param_scheduler']
+        # whether these states should be loaded
+        kwargs = {f'resume_{k}': self._resume for k in resume_related}
+        self.resume(ckpt_path, resume_model=True, **kwargs)  # type: ignore
+        self._has_loaded = True
 
     def train(self) -> nn.Module:
         """Launch training.
@@ -1667,7 +1676,7 @@ class Runner:
         # initialize the model weights
         self._init_model_weights()
         # make sure checkpoint-related hooks are triggered after `before_run`
-        self.load_or_resume()
+        self.maybe_load_or_resume()
 
         # Initiate inner count of `optim_wrapper`.
         self.optim_wrapper.initialize_count_status(
@@ -1696,7 +1705,7 @@ class Runner:
         self.call_hook('before_run')
 
         # make sure checkpoint-related hooks are triggered after `before_run`
-        self.load_or_resume()
+        self.maybe_load_or_resume()
 
         metrics = self.val_loop.run()  # type: ignore
         self.call_hook('after_run')
@@ -1719,7 +1728,7 @@ class Runner:
         self.call_hook('before_run')
 
         # make sure checkpoint-related hooks are triggered after `before_run`
-        self.load_or_resume()
+        self.maybe_load_or_resume()
 
         metrics = self.test_loop.run()  # type: ignore
         self.call_hook('after_run')
@@ -1897,29 +1906,71 @@ class Runner:
 
     def resume(self,
                filename: str,
+               resume_meta: bool = True,
+               resume_model: bool = True,
                resume_optimizer: bool = True,
                resume_param_scheduler: bool = True,
-               map_location: Union[str, Callable] = 'default') -> None:
-        """Resume model from checkpoint.
+               map_location: Union[str, Callable] = 'default',
+               strict: bool = False,
+               revise_keys: list = [(r'^module.', '')]) -> None:
+        """Resume everything from checkpoint once specified.
 
         Args:
             filename (str): Accept local filepath, URL, ``torchvision://xxx``,
                 ``open-mmlab://xxx``.
+            resume_meta (bool): Whether to resume meta infos, currently
+                including 'meta' and 'message_hub'.
+                Defaults to True.
+            resume_model (bool): Whether to resume model state.
+                Defaults to True.
             resume_optimizer (bool): Whether to resume optimizer state.
                 Defaults to True.
             resume_param_scheduler (bool): Whether to resume param scheduler
-                state. Defaults to True.
-            map_location (str or callable):A string or a callable function to
+                state.
+                Defaults to True.
+            map_location (str or callable): A string or a callable function to
                 specifying how to remap storage locations.
                 Defaults to 'default'.
+            strict (bool): whether to strictly enforce that the keys in
+                checkpoint's state_dict match the keys of the model. Only
+                take effect when ``resume_model=True``.
+                Default to False.
+            revise_keys (list, optional): A list of (pattrn, repl) pairs of
+                regex replacement to be applied to checkpoint's state_dict
+                before loaded to the model. Only take effect when
+                ``resume_model=True``.
+                Defaults to [(r'^module.', '')].
         """
-        if map_location == 'default':
-            device = get_device()
-            checkpoint = self.load_checkpoint(filename, map_location=device)
-        else:
-            checkpoint = self.load_checkpoint(
-                filename, map_location=map_location)
+        device = get_device() if map_location == 'default' else map_location
+        checkpoint = _load_checkpoint(filename, map_location=device)
+        self.logger.info(f'Load checkpoint from {filename}')
+        self.call_hook('after_load_checkpoint', checkpoint=checkpoint)
 
+        # resume meta infos, i.e. messages stored by MMEngine like messagehub
+        if resume_meta:
+            self.resume_meta(checkpoint)
+
+        if resume_model:
+            self.resume_model(
+                checkpoint, strict=strict, revise_keys=revise_keys)
+
+        if resume_optimizer:
+            self.resume_optimizer(checkpoint)
+
+        if resume_param_scheduler:
+            self.resume_param_scheduler(checkpoint)
+
+        self.logger.info(f'resumed epoch: {self.epoch}, iter: {self.iter}')
+        self._has_loaded = True
+
+    def resume_meta(self, checkpoint: dict):
+        """Resume meta infos, i.e. 'meta' and 'message_hub' from checkpoint.
+
+        Args:
+            checkpoint (dict): Loaded checkpoint.
+        """
+        assert 'meta' in checkpoint
+        assert 'message_hub' in checkpoint
         self.train_loop._epoch = checkpoint['meta']['epoch']
         self.train_loop._iter = checkpoint['meta']['iter']
 
@@ -1970,78 +2021,80 @@ class Runner:
 
         self.message_hub.load_state_dict(checkpoint['message_hub'])
 
-        # resume optimizer
-        if 'optimizer' in checkpoint and resume_optimizer:
-            self.optim_wrapper = self.build_optim_wrapper(self.optim_wrapper)
-            self.optim_wrapper.load_state_dict(  # type: ignore
-                checkpoint['optimizer'])
+    def resume_optimizer(self, checkpoint: dict):
+        """Resume optimizer state from checkpoint.
 
-        # resume param scheduler
-        if resume_param_scheduler and self.param_schedulers is None:
+        Args:
+            checkpoint (dict): Loaded checkpoint.
+        """
+        assert 'optimizer' in checkpoint
+        self.optim_wrapper = self.build_optim_wrapper(self.optim_wrapper)
+        self.optim_wrapper.load_state_dict(checkpoint['optimizer'])
+
+    def resume_param_scheduler(self, checkpoint: dict):
+        """Resume param scheduler state from checkpoint.
+
+        Args:
+            checkpoint (dict): Loaded checkpoint.
+        """
+        if self.param_schedulers is None:
             print_log(
                 '`resume_param_scheduler` is True but `self.param_schedulers` '
                 'is None, so skip resuming parameter schedulers',
                 logger='current',
                 level=logging.WARNING)
-            resume_param_scheduler = False
-        if 'param_schedulers' in checkpoint and resume_param_scheduler:
-            self.param_schedulers = self.build_param_scheduler(  # type: ignore
-                self.param_schedulers)  # type: ignore
-            if isinstance(self.param_schedulers, dict):
-                for name, schedulers in self.param_schedulers.items():
-                    for scheduler, ckpt_scheduler in zip(
-                            schedulers, checkpoint['param_schedulers'][name]):
-                        scheduler.load_state_dict(ckpt_scheduler)
-            else:
+            return
+
+        assert 'param_schedulers' in checkpoint
+        self.param_schedulers = self.build_param_scheduler(  # type: ignore
+            self.param_schedulers)  # type: ignore
+        if isinstance(self.param_schedulers, dict):
+            for name, schedulers in self.param_schedulers.items():
                 for scheduler, ckpt_scheduler in zip(
-                        self.param_schedulers,  # type: ignore
-                        checkpoint['param_schedulers']):
+                        schedulers, checkpoint['param_schedulers'][name]):
                     scheduler.load_state_dict(ckpt_scheduler)
+        else:
+            for scheduler, ckpt_scheduler in zip(
+                    self.param_schedulers, checkpoint['param_schedulers']):
+                scheduler.load_state_dict(ckpt_scheduler)
 
-        self._has_loaded = True
-
-        self.logger.info(f'resumed epoch: {self.epoch}, iter: {self.iter}')
-
-    def load_checkpoint(self,
-                        filename: str,
-                        map_location: Union[str, Callable] = 'cpu',
-                        strict: bool = False,
-                        revise_keys: list = [(r'^module.', '')]):
-        """Load checkpoint from given ``filename``.
+    def resume_model(self,
+                     checkpoint: dict,
+                     strict: bool = False,
+                     revise_keys: list = [(r'^module.', '')]):
+        """Resume model state from checkpoint.
 
         Args:
-            filename (str): Accept local filepath, URL, ``torchvision://xxx``,
-                ``open-mmlab://xxx``.
-            map_location (str or callable): A string or a callable function to
-                specifying how to remap storage locations.
-                Defaults to 'cpu'.
-            strict (bool): strict (bool): Whether to allow different params for
-                the model and checkpoint.
-            revise_keys (list): A list of customized keywords to modify the
-                state_dict in checkpoint. Each item is a (pattern, replacement)
-                pair of the regular expression operations. Default: strip
-                the prefix 'module.' by [(r'^module\\.', '')].
+            checkpoint (dict): Loaded checkpoint.
+            strict (bool): whether to strictly enforce that the keys in
+                checkpoint's state_dict match the keys of the model.
+                Default to False.
+            revise_keys (list, optional): A list of (pattrn, repl) pairs of
+                regex replacement to be applied to checkpoint's state_dict
+                before loaded to the model.
+                Defaults to [(r'^module.', '')].
         """
-        checkpoint = _load_checkpoint(filename, map_location=map_location)
-
-        # Add comments to describe the usage of `after_load_ckpt`
-        self.call_hook('after_load_checkpoint', checkpoint=checkpoint)
-
         if is_model_wrapper(self.model):
             model = self.model.module
         else:
             model = self.model
+        _load_checkpoint_to_model(
+            model, checkpoint, strict=strict, revise_keys=revise_keys)
 
-        checkpoint = _load_checkpoint_to_model(
-            model, checkpoint, strict, revise_keys=revise_keys)
+    @deprecated_function(
+        since='0.6.0',
+        removed_in='1.0.0',
+        instructions='`Runner.load_checkpoint` will be deprecated in the '
+        'future, please use `Runner.resume` without enabling resume from '
+        'meta, optimizer and param_scheduler.')
+    def load_checkpoint(self, filename: str, **kwargs):
+        resume_related = ['meta', 'optimizer', 'param_scheduler']
+        # whether these states should be loaded
+        kwargs.update({f'resume_{k}': False for k in resume_related})
+        return self.resume(filename, resume_model=True, **kwargs)
 
-        self._has_loaded = True
-
-        self.logger.info(f'Load checkpoint from {filename}')
-
-        return checkpoint
-
-    @master_only
+    # ZeRO-like parallel methods require collecting states from all ranks, so
+    # this function should not be `master_only`
     def save_checkpoint(
         self,
         out_dir: str,
@@ -2077,21 +2130,6 @@ class Runner:
                 preifx of uri corresponding backend. Defaults to None.
                 New in v0.2.0.
         """
-        if meta is None:
-            meta = {}
-        elif not isinstance(meta, dict):
-            raise TypeError(
-                f'meta should be a dict or None, but got {type(meta)}')
-
-        if by_epoch:
-            # self.epoch increments 1 after
-            # `self.call_hook('after_train_epoch)` but `save_checkpoint` is
-            # called by `after_train_epoch`` method of `CheckpointHook` so
-            # `epoch` should be `self.epoch + 1`
-            meta.update(epoch=self.epoch + 1, iter=self.iter)
-        else:
-            meta.update(epoch=self.epoch, iter=self.iter + 1)
-
         if file_client_args is not None:
             warnings.warn(
                 '"file_client_args" will be deprecated in future. '
@@ -2107,6 +2145,45 @@ class Runner:
             filepath = join_path(  # type: ignore
                 out_dir, filename, backend_args=backend_args)
 
+        checkpoint = {}
+        checkpoint.update(self.collect_meta_checkpoint(meta, by_epoch))
+        checkpoint.update(self.collect_model_checkpoint())
+        if save_optimizer:
+            checkpoint.update(self.collect_optimizer_checkpoint())
+        if save_param_scheduler:
+            checkpoint.update(self.collect_param_scheduler_checkpoint())
+
+        self.call_hook('before_save_checkpoint', checkpoint=checkpoint)
+        self.save_checkpoint_to_file(checkpoint, filepath)
+
+    def collect_meta_checkpoint(self, meta: Optional[Dict],
+                                by_epoch: bool) -> Dict:
+        """Collect meta information and return a partial checkpoint.
+
+        Args:
+            meta (dict, optional): The meta information to be saved in the
+                checkpoint. Defaults to None.
+            by_epoch (bool): Whether the scheduled momentum is updated by
+                epochs. Defaults to True.
+
+        Returns:
+            Dict: A partial checkpoint containing meta and message_hub.
+        """
+        if meta is None:
+            meta = {}
+        elif not isinstance(meta, dict):
+            raise TypeError(
+                f'meta should be a dict or None, but got {type(meta)}')
+
+        if by_epoch:
+            # self.epoch increments 1 after
+            # `self.call_hook('after_train_epoch)` but `save_checkpoint` is
+            # called by `after_train_epoch`` method of `CheckpointHook` so
+            # `epoch` should be `self.epoch + 1`
+            meta.update(epoch=self.epoch + 1, iter=self.iter)
+        else:
+            meta.update(epoch=self.epoch, iter=self.iter + 1)
+
         meta.update(
             cfg=self.cfg.pretty_text,
             seed=self.seed,
@@ -2117,50 +2194,74 @@ class Runner:
         if hasattr(self.train_dataloader.dataset, 'metainfo'):
             meta.update(dataset_meta=self.train_dataloader.dataset.metainfo)
 
+        return {'meta': meta, 'message_hub': self.message_hub.state_dict()}
+
+    def collect_model_checkpoint(self) -> Dict:
+        """Collect model states and return a partial checkpoint.
+
+        Returns:
+            Dict: A partial checkpoint containing model states.
+        """
         if is_model_wrapper(self.model):
             model = self.model.module
         else:
             model = self.model
+        state_dict = get_state_dict(model)
+        return {'state_dict': weights_to_cpu(state_dict)}
 
-        checkpoint = {
-            'meta': meta,
-            'state_dict': weights_to_cpu(get_state_dict(model)),
-            'message_hub': self.message_hub.state_dict()
-        }
-        # save optimizer state dict to checkpoint
-        if save_optimizer:
-            if isinstance(self.optim_wrapper, OptimWrapper):
-                checkpoint['optimizer'] = self.optim_wrapper.state_dict()
-            else:
-                raise TypeError(
-                    'self.optim_wrapper should be an `OptimWrapper` '
-                    'or `OptimWrapperDict` instance, but got '
-                    f'{self.optim_wrapper}')
+    def collect_optimizer_checkpoint(self) -> Dict:
+        """Collect optimizer states and return a partial checkpoint.
 
-        # save param scheduler state dict
-        if save_param_scheduler and self.param_schedulers is None:
+        Returns:
+            Dict: A partial checkpoint containing optimizer states.
+        """
+        if not isinstance(self.optim_wrapper, OptimWrapper):
+            raise TypeError('self.optim_wrapper should be an `OptimWrapper` '
+                            'or `OptimWrapperDict` instance, but got '
+                            f'{self.optim_wrapper}')
+        state_dict = self.optim_wrapper.state_dict()
+        return {'optimizer': state_dict}
+
+    def collect_param_scheduler_checkpoint(self) -> Dict:
+        """Collect param schedulers states and return a partial checkpoint.
+
+        Returns:
+            Dict: A partial checkpoint containing param schedulers states.
+        """
+        if self.param_schedulers is None:
             print_log(
                 '`save_param_scheduler` is True but `self.param_schedulers` '
                 'is None, so skip saving parameter schedulers',
                 logger='current',
                 level=logging.WARNING)
-            save_param_scheduler = False
-        if save_param_scheduler:
-            if isinstance(self.param_schedulers, dict):
-                checkpoint['param_schedulers'] = dict()
-                for name, schedulers in self.param_schedulers.items():
-                    checkpoint['param_schedulers'][name] = []
-                    for scheduler in schedulers:
-                        state_dict = scheduler.state_dict()
-                        checkpoint['param_schedulers'][name].append(state_dict)
-            else:
-                checkpoint['param_schedulers'] = []
-                for scheduler in self.param_schedulers:  # type: ignore
-                    state_dict = scheduler.state_dict()  # type: ignore
-                    checkpoint['param_schedulers'].append(state_dict)
+            return {}
 
-        self.call_hook('before_save_checkpoint', checkpoint=checkpoint)
-        save_checkpoint(checkpoint, filepath)
+        checkpoint: Dict = {}
+        if isinstance(self.param_schedulers, dict):
+            checkpoint['param_schedulers'] = dict()
+            for name, schedulers in self.param_schedulers.items():
+                checkpoint['param_schedulers'][name] = []
+                for scheduler in schedulers:
+                    state_dict = scheduler.state_dict()
+                    checkpoint['param_schedulers'][name].append(state_dict)
+        else:
+            checkpoint['param_schedulers'] = []
+            for scheduler in self.param_schedulers:  # type: ignore
+                state_dict = scheduler.state_dict()  # type: ignore
+                checkpoint['param_schedulers'].append(state_dict)
+        return checkpoint
+
+    def save_checkpoint_to_file(self, checkpoint: Dict, filepath: str):
+        """Save the given checkpoint according to the given path. The path may
+        contain prefixes to save to different backends, e.g. https://
+
+        Args:
+            checkpoint (Dict): A dictionary containing training states.
+            filepath (str): Path to save. It may starts with prefixes to
+                indicate different backends, e.g. https://
+        """
+        # Avoid multiple processes saving the checkpoint at the same time
+        master_only(save_checkpoint)(checkpoint, filepath)
 
     @master_only
     def dump_config(self) -> None:

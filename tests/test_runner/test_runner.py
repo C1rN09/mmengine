@@ -2102,7 +2102,7 @@ class TestRunner(TestCase):
         cfg.experiment_name = 'test_checkpoint4'
         cfg.resume = True
         runner = Runner.from_cfg(cfg)
-        runner.load_or_resume()
+        runner.maybe_load_or_resume()
         self.assertEqual(runner.epoch, 3)
         self.assertEqual(runner.iter, 12)
         self.assertTrue(runner._has_loaded)
@@ -2115,7 +2115,7 @@ class TestRunner(TestCase):
         cfg.resume = True
         cfg.load_from = osp.join(self.temp_dir, 'epoch_1.pth')
         runner = Runner.from_cfg(cfg)
-        runner.load_or_resume()
+        runner.maybe_load_or_resume()
         self.assertEqual(runner.epoch, 1)
         self.assertEqual(runner.iter, 4)
         self.assertTrue(runner._has_loaded)
@@ -2226,7 +2226,7 @@ class TestRunner(TestCase):
         cfg.experiment_name = 'test_checkpoint11'
         cfg.resume = True
         runner = Runner.from_cfg(cfg)
-        runner.load_or_resume()
+        runner.maybe_load_or_resume()
         self.assertEqual(runner.epoch, 0)
         self.assertEqual(runner.iter, 12)
         self.assertTrue(runner._has_loaded)
@@ -2239,7 +2239,7 @@ class TestRunner(TestCase):
         cfg.resume = True
         cfg.load_from = osp.join(self.temp_dir, 'iter_3.pth')
         runner = Runner.from_cfg(cfg)
-        runner.load_or_resume()
+        runner.maybe_load_or_resume()
         self.assertEqual(runner.epoch, 0)
         self.assertEqual(runner.iter, 3)
         self.assertTrue(runner._has_loaded)
@@ -2252,7 +2252,7 @@ class TestRunner(TestCase):
         cfg.resume = True
         cfg.load_from = osp.join(self.temp_dir, 'iter_3.pth')
         runner = Runner.from_cfg(cfg)
-        runner.load_or_resume()
+        runner.maybe_load_or_resume()
         assert len(runner.message_hub.log_scalars['train/lr'].data[1]) == 3
         assert len(MessageHub.get_current_instance().log_scalars['train/lr'].
                    data[1]) == 3
