@@ -397,15 +397,7 @@ class Runner:
             # Merge the data_preprocessor to model config.
             model.setdefault('data_preprocessor', data_preprocessor)
         self.model = self.build_model(model)
-        # wrap model
-        self.model = self.wrap_model(
-            self.cfg.get('model_wrapper_cfg'), self.model)
-
-        # get model name from the model class
-        if hasattr(self.model, 'module'):
-            self._model_name = self.model.module.__class__.__name__
-        else:
-            self._model_name = self.model.__class__.__name__
+        self._model_name = self.model.__class__.__name__
 
         self._hooks: List[Hook] = []
         # register hooks to `self._hooks`
@@ -881,6 +873,8 @@ class Runner:
     def _init_model_weights(self) -> None:
         """Initialize the model weights if the model has
         :meth:`init_weights`"""
+        # Make mypy happy
+        assert isinstance(self.model, nn.Module)
         model = self.model.module if is_model_wrapper(
             self.model) else self.model
         if hasattr(model, 'init_weights'):
@@ -1634,16 +1628,14 @@ class Runner:
         Returns:
             nn.Module: The model after training.
         """
-        if is_model_wrapper(self.model):
-            ori_model = self.model.module
-        else:
-            ori_model = self.model
-        assert hasattr(ori_model, 'train_step'), (
+        # lazy wrap model
+        self.model = self.wrap_model(
+            self.cfg.get('model_wrapper_cfg'), self.model)
+        assert hasattr(self.model, 'train_step'), (
             'If you want to train your model, please make sure your model '
             'has implemented `train_step`.')
-
         if self._val_loop is not None:
-            assert hasattr(ori_model, 'val_step'), (
+            assert hasattr(self.model, 'val_step'), (
                 'If you want to validate your model, please make sure your '
                 'model has implemented `val_step`.')
 
@@ -1654,8 +1646,7 @@ class Runner:
                 '`optimizer` and `param_scheduler` arguments when '
                 'initializing runner.')
 
-        self._train_loop = self.build_train_loop(
-            self._train_loop)  # type: ignore
+        self._train_loop = self.build_train_loop(self._train_loop)
 
         # `build_optimizer` should be called before `build_param_scheduler`
         #  because the latter depends on the former
@@ -1694,6 +1685,9 @@ class Runner:
         Returns:
             dict: A dict of metrics on validation set.
         """
+        # lazy wrap model
+        self.model = self.wrap_model(
+            self.cfg.get('model_wrapper_cfg'), self.model)
         if self._val_loop is None:
             raise RuntimeError(
                 '`self._val_loop` should not be None when calling val method.'
@@ -1717,6 +1711,9 @@ class Runner:
         Returns:
             dict: A dict of metrics on testing set.
         """
+        # lazy wrap model
+        self.model = self.wrap_model(
+            self.cfg.get('model_wrapper_cfg'), self.model)
         if self._test_loop is None:
             raise RuntimeError(
                 '`self._test_loop` should not be None when calling test '
@@ -2074,6 +2071,8 @@ class Runner:
                 before loaded to the model.
                 Defaults to [(r'^module.', '')].
         """
+        # Make mypy happy
+        assert isinstance(self.model, nn.Module)
         if is_model_wrapper(self.model):
             model = self.model.module
         else:
@@ -2202,6 +2201,8 @@ class Runner:
         Returns:
             Dict: A partial checkpoint containing model states.
         """
+        # Make mypy happy
+        assert isinstance(self.model, nn.Module)
         if is_model_wrapper(self.model):
             model = self.model.module
         else:
