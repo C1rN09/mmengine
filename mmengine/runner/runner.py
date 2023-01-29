@@ -934,7 +934,7 @@ class Runner:
                 return any(_is_built(s) for s in schedulers)
             return isinstance(schedulers, _ParamScheduler)
 
-        if _is_built(self.param_schedulers):
+        if _is_built(self.param_schedulers) and not self._has_loaded:
             raise RuntimeError('`scale_lr` should be called before building '
                                'ParamScheduler because ParamScheduler will '
                                'store initial lr from optimizer wrappers')
@@ -1638,6 +1638,8 @@ class Runner:
 
         # initialize the model weights
         self._init_model_weights()
+        # make sure state_dict in optimizer is resumed to the right device
+        self.model = self.model.to(get_device())
         # make sure checkpoint-related hooks are triggered after `before_run`
         self.load_or_resume()
         # lazy wrap model. This should be called after `load_or_resume` to be
